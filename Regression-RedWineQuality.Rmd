@@ -1,0 +1,190 @@
+---
+title: 'Regression: Predicting Quality of Red Wine'
+author: "Prithviraj Lakkakula"
+date: "1/23/2022"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    toc: yes
+    highlight: zenburn
+    theme: readable
+    fig_width: 10
+    fig_height: 10
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data Source and Information
+
+Data are collected from <https://archive.ics.uci.edu/ml/datasets/wine+quality>. Originally, there are two datasets, including red wine and white wine. However, in this project, I consider only the red wine data set. The two datasets are related to red and white variants of the Portuguese "Vinho Verde" wine. See [Cortez et al., 2009] for more details. In the source, there was a note that due to privacy and logistical issues, only physicochemical (inputs) and sensory (the output) variables are available, which means that there may be other variables that could be missing that could have helped our prediction to be more accurate than I could predict in this analysis. Therefore, bear in mind that there could be omitted variable bias in this analysis. The source mentioned that other omitted variables could include grape type, wine brand, wine selling price etc.
+
+The raw dataset for red wine contains a total of 12 variables, including quality (score between 0 and 1), which is our response varible in our regression setting and 11 other physicochemical attributes as inputs. These include fixed acidity, volatile acidity, citric acid, residual sugar, chlorides, free sulfur dioxide, total sulfur dioxide, density, pH, sulphates, alcohol.
+
+## Data Preprocessing
+
+### Data Summary
+
+```{r}
+red_wine <- read.csv("winequality-red.csv")
+summary(red_wine)
+#str(red_wine)
+```
+
+### Missing Values
+
+The data set do not contain missing values. However, the variable `citric_acid` contains zero values. However, ideally, we should know whether they are indeed zeroes from the client.
+
+### Outliers/Anomalies
+
+```{r}
+boxplot(red_wine[, c(1:5)])
+boxplot(red_wine[, c(6:7)])
+boxplot(red_wine[, c(8:11)])
+```
+
+```{r}
+# install.packages("GGally")
+library(GGally)
+
+ggpairs(red_wine,          # Data frame
+        columns = 1:11) # Columns
+```
+
+The graph shows that features, including citric_acid, free_sulphur_do2, tot_sulphur_do2, and some others suffer from anomalies. Here, I use the following to cleanup some of the features using some of the preprocessing techniques. Anomalies can be problematic in accurately predicting the quality of the red wine. We will account for it by normalizing the features with Z-score normalization or standardization as it is robust to outliers/anomalies.
+
+### Near-Zero Variance Features
+
+In this we look at the features to analyze if we have any non-variant features.
+
+```{r}
+library(caret)
+nzv_features <- nearZeroVar(red_wine[, -12], names = TRUE)
+print(nzv_features)
+```
+
+Based on the results, we do not have non-zero variant features
+
+### Highly Correlated Features
+
+```{r}
+## Highly correlated predictors: cor__gt_90
+(cor_gt_90 <- findCorrelation(cor(red_wine), names = TRUE))
+## Highly correlated predictors (>= 98%): cor_gt_98
+(cor_gt_98 <- findCorrelation(cor(red_wine), names = TRUE, cutoff = 0.98))
+
+```
+
+The features are not highly correlated.
+
+### Linear Regression
+
+```{r}
+library(estimatr)
+lr_mod1 <- lm_robust(quality ~ ., data = red_wine)
+summary(lr_mod1)
+
+lr_mod2 <- lm_robust(quality ~ volatile_acidity + chlorides + tot_sulfur_do2 + pH + sulphates + alcohol, data = red_wine)
+summary(lr_mod2)
+
+```
+
+As you saw from lr_mod2 with less features (after removing perceived irrelevant features) perform equally well (based on Adjusted $R^2$) compared with the lr_mod1 with all the features. Moving forward, we will consider only the features that are important in predicting the quality of red wine. That is, we use only the features that were included in the lr_mod2.
+
+### Data Normalization
+
+From the boxplots shown above, almost all of them has outliers at some level of degree. Therefore, we need to standardize the features.
+
+```{r}
+red_wine_scaled <- scale(red_wine[, -12])
+boxplot(red_wine_scaled[, c(1:5)])
+boxplot(red_wine_scaled[, c(6:7)])
+boxplot(red_wine_scaled[, c(8:11)])
+all_red_wine_scaled <- data.frame(cbind(red_wine_scaled, red_wine$quality))
+#str(all_red_wine_scaled)
+colnames(all_red_wine_scaled)[12] <- "quality"
+summary(all_red_wine_scaled)
+#write.csv(all_red_wine_scaled,"/Users/prithvirajlakkakula/Desktop/Regression-RedWineQuality/all_red_wine_scaled.csv", row.names = FALSE)
+#/Users/prithvirajlakkakula/Desktop/Regression-RedWineQuality
+```
+
+Based on the boxplots, all the features are brought to the same scale.
+
+### Exploratory Graphs
+
+## Splitting the Data into Training and Testing sets
+
+```{r}
+library(h2o)
+h2o.init()
+
+df <- h2o.importFile("/Users/prithvirajlakkakula/Desktop/GitHubProjects/Regression-RedWineQuality/all_red_wine_scaled.csv")
+
+h2o.describe(df)
+y <- "quality"
+
+data_splits <- h2o.splitFrame(df, ratios = 0.75, seed = 143)
+
+training <- data_splits[[1]]
+testing <- data_splits[[2]]
+
+```
+
+## Training
+
+```{r}
+auto_ml <- h2o.automl(y = y,
+                  training_frame = training,
+                  leaderboard_frame = testing,
+                  max_runtime_secs = 500,
+                  seed = 143)#,
+                  #project_name = "winequality_lb_frame")
+```
+
+## Predicting on test set
+
+```{r}
+print(auto_ml@leaderboard)
+```
+
+```{r}
+preds <- h2o.predict(auto_ml, testing)
+head(preds)
+```
+
+```{r}
+aml_perf <- h2o.performance(auto_ml@leader, testing)
+aml_perf
+```
+
+```{r}
+explns <- h2o.explain(auto_ml, testing)
+explns
+```
+
+```{r}
+library(lime)
+model_ids <-as.data.frame(auto_ml@leaderboard$model_id)[,1]
+best_model <- h2o.getModel(grep("StackedEnsemble_BestOfFamily", model_ids, value=TRUE)[1])
+
+explainer <- lime(as.data.frame(training[, -12]), best_model, bin_continuous = F) #remove 'Attrition' column keeping only predictors
+explanation <- explain(as.data.frame(testing[, -12]), #cherry picked rows for explaining pusposes
+                       explainer = explainer,
+                       kernel_width = 1,
+                       n_features = 5, #max features to explain each model
+                       n_labels = 1) 
+```
+
+```{r}
+plot_features(explanation)
+```
+
+## Model Evaluation
+
+## Conclusion
+
+## References
+
+-   P. Cortez, A. Cerdeira, F. Almeida, T. Matos and J. Reis. Modeling wine preferences by data mining from physicochemical properties. In Decision Support Systems, Elsevier, 47(4):547-553, 2009.
